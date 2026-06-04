@@ -9,6 +9,9 @@ use tauri::{
 };
 use tokio::time::{sleep, Duration};
 
+/// Maximum number of live history snapshots kept in memory (60s window).
+const HISTORY_BUFFER_SIZE: usize = 60;
+
 mod db;
 use db::{DbManager, HistoricalPoint};
 
@@ -469,11 +472,21 @@ fn get_processes(state: State<SysState>) -> Vec<ProcessInfo> {
 /// If normal kill fails (permission denied), it attempts to kill with elevation.
 #[tauri::command]
 fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
+    // Validate PID range: 0 is invalid; Linux max is 4194304 (2^22)
+    if pid == 0 || pid > 4_194_304 {
+        return Err(format!("Invalid PID: {}", pid));
+    }
+    // Ensure pid string only contains digits (defense-in-depth before shell args)
+    let pid_str = pid.to_string();
+    if !pid_str.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Invalid PID format".to_string());
+    }
+
     let mut sys = state.sys.lock().unwrap();
-    
+
     // Refresh only the processes to get an up-to-date PID list
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    
+
     if let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) {
         // 1. Try normal kill
         if p.kill() {
@@ -486,7 +499,7 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
             let status = Command::new("pkexec")
-                .args(["kill", "-9", &pid.to_string()])
+                .args(["kill", "-9", &pid_str])
                 .status()
                 .map_err(|e| e.to_string())?;
             if status.success() { return Ok(()); }
@@ -494,7 +507,7 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
-            let script = format!("do shell script \"kill -9 {}\" with administrator privileges", pid);
+            let script = format!("do shell script \"kill -9 {}\" with administrator privileges", pid_str);
             let status = Command::new("osascript")
                 .args(["-e", &script])
                 .status()
@@ -509,7 +522,7 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
                     "-Command",
                     &format!(
                         "$taskkill = Start-Process taskkill -ArgumentList '/F', '/PID', '{}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $taskkill.ExitCode",
-                        pid
+                        pid_str
                     )
                 ])
                 .status()
@@ -862,14 +875,21 @@ fn get_scan_results(state: State<SysState>) -> (bool, Vec<DiskEntry>) {
 /// Emits `scan-progress` and `scan-finished` events.
 #[tauri::command]
 async fn scan_directory(app: AppHandle, state: State<'_, SysState>, path: String) -> Result<(), String> {
-    let root = std::path::PathBuf::from(&path);
-    
-    // 1. Validation
-    if !root.exists() {
-        return Err(format!("The path \"{}\" does not exist.", path));
-    }
+    // 1. Canonicalize to resolve symlinks and `..` traversal attempts
+    let root = std::fs::canonicalize(&path)
+        .map_err(|_| format!("Cannot access path: {}", path))?;
+
     if !root.is_dir() {
         return Err(format!("The path \"{}\" is not a directory.", path));
+    }
+
+    // 2. Block scanning sensitive system directories
+    let forbidden = ["/proc", "/sys", "/dev", "/etc", "/var/log", "/run"];
+    let root_str = root.to_string_lossy();
+    for dir in &forbidden {
+        if root_str.starts_with(dir) {
+            return Err(format!("Scanning {} is not allowed for security reasons.", dir));
+        }
     }
 
     // 2. Check if already scanning
@@ -1625,11 +1645,11 @@ pub fn run() {
             app.manage(SysState {
                 sys: Mutex::new(System::new_all()),
                 settings: Mutex::new(settings),
-                history: Mutex::new(VecDeque::with_capacity(60)),
+                history: Mutex::new(VecDeque::with_capacity(HISTORY_BUFFER_SIZE)),
                 scan_results: Mutex::new(Vec::new()),
                 is_scanning: Mutex::new(false),
                 networks: Mutex::new(sysinfo::Networks::new_with_refreshed_list()),
-                net_history: Mutex::new(VecDeque::with_capacity(60)),
+                net_history: Mutex::new(VecDeque::with_capacity(HISTORY_BUFFER_SIZE)),
                 components: Mutex::new(sysinfo::Components::new_with_refreshed_list()),
                 db: Mutex::new(db_manager),
             });

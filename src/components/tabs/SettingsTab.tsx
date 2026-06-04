@@ -13,6 +13,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { AppSettings } from "@/types";
 import { fmtBytes } from "@/lib/utils";
+import { formatError } from "@/lib/errors";
 
 const DEFAULT_SETTINGS: AppSettings = {
   refresh_interval_secs: 3,
@@ -59,7 +60,7 @@ export function SettingsTab() {
       await invoke("save_settings", { settings: newSettings });
     } catch (e) {
       console.error("save_settings error:", e);
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setTimeout(() => setSaving(false), 600);
     }
@@ -297,7 +298,7 @@ export function SettingsTab() {
                     loadSettings();
                     setShowConfirm(false);
                   } catch (e) {
-                    setError("Failed to clear history: " + String(e));
+                    setError("Failed to clear history: " + formatError(e));
                   } finally {
                     setClearing(false);
                   }

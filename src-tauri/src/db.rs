@@ -73,7 +73,8 @@ impl DbManager {
             "SELECT ts, cpu_pct, ram_used, ram_total, disk_used, disk_total, cpu_temp 
              FROM snapshots 
              WHERE ts >= ?1 
-             ORDER BY ts ASC"
+             ORDER BY ts ASC
+             LIMIT 10000"
         )?;
 
         let rows = stmt.query_map(params![start_ts], |row| {

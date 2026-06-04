@@ -5,6 +5,7 @@ import { useEffect } from "react";
 import { Cpu, MemoryStick, HardDrive, Battery, Skull } from "lucide-react";
 import { api } from "@/lib/api";
 import { fmtBytes, barColor, healthColor, healthPctColor } from "@/lib/utils";
+import { formatTemperature, tempColorClass } from "@/lib/temperature";
 import { StatCard } from "@/components/layout/StatCard";
 import { HistoryChart } from "@/components/charts/HistoryChart";
 import { useAppStore } from "@/store/app";
@@ -99,10 +100,7 @@ export function MemoryTab() {
     queryFn: api.getSettings,
   });
 
-  const fmtTemp = (c: number) => {
-    if (settings?.temp_unit === "f") return `${((c * 9/5) + 32).toFixed(0)}°F`;
-    return `${c.toFixed(0)}°C`;
-  };
+  const fmtTemp = (c: number) => formatTemperature(c, settings?.temp_unit);
 
   // Refresh when backend emits process-update
   useEffect(() => {
@@ -159,11 +157,7 @@ export function MemoryTab() {
           pct={cpuPct}
           icon={<Cpu size={14} />}
           badge={sysInfo && sysInfo.cpu_temp > 0 && (
-            <div className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold border transition-colors ${
-              sysInfo.cpu_temp > 80 ? "bg-red-500/10 text-red-400 border-red-500/20" :
-              sysInfo.cpu_temp > 60 ? "bg-amber-500/10 text-amber-400 border-amber-500/20" :
-              "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-            }`}>
+            <div className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold border transition-colors ${tempColorClass(sysInfo.cpu_temp)}`}>
               {fmtTemp(sysInfo.cpu_temp)}
             </div>
           )}
