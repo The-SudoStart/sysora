@@ -468,79 +468,115 @@ fn get_processes(state: State<SysState>) -> Vec<ProcessInfo> {
     procs
 }
 
-/// Kills a process by PID. Returns success or an error message.
-/// If normal kill fails (permission denied), it attempts to kill with elevation.
+/// Kills a process by PID and all sibling processes sharing the same name.
+/// This handles multi-process apps (browsers, Electron apps) where a single
+/// PID kill leaves other instances running.
+/// Falls back to elevated killall if normal kill is denied.
 #[tauri::command]
 fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
     // Validate PID range: 0 is invalid; Linux max is 4194304 (2^22)
     if pid == 0 || pid > 4_194_304 {
         return Err(format!("Invalid PID: {}", pid));
     }
-    // Ensure pid string only contains digits (defense-in-depth before shell args)
     let pid_str = pid.to_string();
     if !pid_str.chars().all(|c| c.is_ascii_digit()) {
         return Err("Invalid PID format".to_string());
     }
 
     let mut sys = state.sys.lock().unwrap();
-
-    // Refresh only the processes to get an up-to-date PID list
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-    if let Some(p) = sys.process(sysinfo::Pid::from_u32(pid)) {
-        // 1. Try normal kill
-        if p.kill() {
-            return Ok(());
-        }
+    // Capture the process name before killing so we can find siblings
+    let proc_name = sys
+        .process(sysinfo::Pid::from_u32(pid))
+        .map(|p| p.name().to_string_lossy().to_string());
 
-        // 2. If normal kill fails, try elevated kill
-        use std::process::Command;
+    let Some(name) = proc_name else {
+        return Err(format!("Process with PID {} not found or already terminated", pid));
+    };
 
-        #[cfg(target_os = "linux")]
-        {
-            let status = Command::new("pkexec")
-                .args(["kill", "-9", &pid_str])
-                .status()
-                .map_err(|e| e.to_string())?;
-            if status.success() { return Ok(()); }
-        }
+    // Kill every process sharing this name (covers multi-process browsers etc.)
+    let matching_pids: Vec<u32> = sys
+        .processes()
+        .values()
+        .filter(|p| p.name().to_string_lossy() == name)
+        .map(|p| p.pid().as_u32())
+        .collect();
 
-        #[cfg(target_os = "macos")]
-        {
-            let script = format!("do shell script \"kill -9 {}\" with administrator privileges", pid_str);
-            let status = Command::new("osascript")
-                .args(["-e", &script])
-                .status()
-                .map_err(|e| e.to_string())?;
-            if status.success() { return Ok(()); }
-        }
+    let mut killed_any = false;
+    let mut needs_elevation = false;
 
-        #[cfg(target_os = "windows")]
-        {
-            let status = Command::new("powershell")
-                .args([
-                    "-Command",
-                    &format!(
-                        "$taskkill = Start-Process taskkill -ArgumentList '/F', '/PID', '{}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $taskkill.ExitCode",
-                        pid_str
-                    )
-                ])
-                .status()
-                .map_err(|e| e.to_string())?;
-
-            if status.success() {
-                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-                if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
-                    return Ok(());
-                }
+    for p_pid in &matching_pids {
+        if let Some(p) = sys.process(sysinfo::Pid::from_u32(*p_pid)) {
+            if p.kill() {
+                killed_any = true;
+            } else {
+                needs_elevation = true;
             }
         }
+    }
 
-        Err("Failed to kill process. Even with elevation, this process might be protected by the system.".to_string())
+    if killed_any && !needs_elevation {
+        return Ok(());
+    }
+
+    // Elevated fallback — killall by name handles remaining instances at once
+    use std::process::Command;
+
+    #[cfg(target_os = "linux")]
+    {
+        let by_name = Command::new("pkexec")
+            .args(["killall", "-9", &name])
+            .status();
+        if by_name.map(|s| s.success()).unwrap_or(false) {
+            return Ok(());
+        }
+        // Last resort: elevate kill on the original PID
+        let status = Command::new("pkexec")
+            .args(["kill", "-9", &pid_str])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() { return Ok(()); }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "do shell script \"killall -9 '{}'\" with administrator privileges",
+            name.replace('\'', "'\\''")
+        );
+        let status = Command::new("osascript")
+            .args(["-e", &script])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() { return Ok(()); }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Start-Process taskkill -ArgumentList '/F', '/IM', '{}.exe' -Verb RunAs -WindowStyle Hidden -Wait",
+                    name
+                )
+            ])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if status.success() { return Ok(()); }
+    }
+
+    if killed_any {
+        Ok(()) // At least some instances were killed
     } else {
-        Err(format!("Process with PID {} not found or already terminated", pid))
+        Err(format!(
+            "Failed to kill '{}'. The process may be protected by the system.",
+            name
+        ))
     }
 }
+
 
 /// Returns a full system snapshot (RAM, CPU, OS info, uptime).
 #[tauri::command]
