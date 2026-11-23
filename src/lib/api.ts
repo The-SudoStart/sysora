@@ -15,6 +15,7 @@ import type {
   TempReading,
   FanReading,
   HistoricalPoint,
+  UpdateInfo,
 } from "@/types";
 
 export const api = {
@@ -41,4 +42,7 @@ export const api = {
   getScanResults: () => invoke<[boolean, DiskEntry[]]>("get_scan_results"),
   deletePath: (path: string) => invoke<void>("delete_path", { path }),
   getHistory: () => invoke<HistoryPoint[]>("get_history"),
+  checkForUpdates: () => invoke<UpdateInfo>("check_for_updates"),
+  runAppUpdate: () => invoke<void>("run_app_update"),
+  restartApp: () => invoke<void>("restart_app"),
 };

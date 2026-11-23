@@ -15,6 +15,8 @@ const HISTORY_BUFFER_SIZE: usize = 60;
 mod db;
 use db::{DbManager, HistoricalPoint};
 
+mod updater;
+
 // ─── Shared system state ────────────────────────────────────────────────────
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct AppSettings {
@@ -1772,6 +1774,9 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Check for updates asynchronously in background on startup
+            updater::start_background_update_checker(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1798,6 +1803,9 @@ pub fn run() {
             get_historical_trends,
             clear_history,
             get_db_stats,
+            updater::check_for_updates,
+            updater::run_app_update,
+            updater::restart_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running sysora");

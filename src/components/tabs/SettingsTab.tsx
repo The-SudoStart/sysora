@@ -8,12 +8,16 @@ import {
   Rocket,
   AlertCircle,
   Database,
-  Trash2
+  Trash2,
+  ArrowUpCircle,
+  RefreshCw,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppSettings } from "@/types";
 import { fmtBytes } from "@/lib/utils";
 import { formatError } from "@/lib/errors";
+import { useAppStore } from "@/store/app";
+import { api } from "@/lib/api";
 
 const DEFAULT_SETTINGS: AppSettings = {
   refresh_interval_secs: 3,
@@ -34,6 +38,26 @@ export function SettingsTab() {
   const [dbStats, setDbStats] = useState<[number, number] | null>(null);
   const [clearing, setClearing] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+
+  const { updateInfo, setUpdateInfo, setIsUpdateModalOpen } = useAppStore();
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateCheckMessage, setUpdateCheckMessage] = useState<string | null>(null);
+
+  const handleCheckForUpdates = async () => {
+    setCheckingUpdate(true);
+    setUpdateCheckMessage(null);
+    try {
+      const info = await api.checkForUpdates();
+      setUpdateInfo(info);
+      if (!info.update_available) {
+        setUpdateCheckMessage("You're on the latest version!");
+      }
+    } catch {
+      setUpdateCheckMessage("Could not check for updates.");
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   const loadSettings = useCallback(() => {
     invoke<AppSettings>("get_settings")
@@ -264,6 +288,57 @@ export function SettingsTab() {
             value={settings.start_minimized}
             onChange={(v) => handleSave({ ...settings, start_minimized: v })}
           />
+        </div>
+      </section>
+
+      {/* Software Updates */}
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 text-surface-400 dark:text-white/50 px-1">
+          <ArrowUpCircle size={14} className="text-brand-600 dark:text-brand-400" />
+          <h3 className="text-[10px] font-bold uppercase tracking-[0.2em]">Software Updates</h3>
+        </div>
+
+        <div className="bg-white dark:bg-white/[0.03] rounded-2xl border border-surface-200 dark:border-white/10 p-5 flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h4 className="text-sm font-semibold text-surface-800 dark:text-white">Sysora Version</h4>
+              <span className="text-xs font-mono font-bold text-brand-600 dark:text-brand-400 bg-brand-600/10 px-2 py-0.5 rounded border border-brand-600/20">
+                v{updateInfo?.current_version ?? "0.3.0"}
+              </span>
+            </div>
+            <p className="text-[11px] text-surface-400 dark:text-white/40 font-medium mt-1">
+              {updateInfo?.update_available ? (
+                <span className="text-brand-600 dark:text-brand-400 font-semibold">
+                  New update available: v{updateInfo.latest_version}
+                </span>
+              ) : updateCheckMessage ? (
+                <span>{updateCheckMessage}</span>
+              ) : (
+                <span>Checked with GitHub releases & version.txt</span>
+              )}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCheckForUpdates}
+              disabled={checkingUpdate}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-bold text-surface-600 dark:text-white/60 hover:text-surface-900 dark:hover:text-white bg-surface-100 dark:bg-white/5 hover:bg-surface-200 dark:hover:bg-white/10 rounded-lg transition-all border border-surface-200 dark:border-white/5"
+            >
+              <RefreshCw size={12} className={checkingUpdate ? "animate-spin" : ""} />
+              {checkingUpdate ? "Checking…" : "Check for Updates"}
+            </button>
+
+            {updateInfo?.update_available && (
+              <button
+                onClick={() => setIsUpdateModalOpen(true)}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 text-[10px] font-bold bg-brand-600 hover:bg-brand-500 text-white rounded-lg shadow-lg shadow-brand-600/20 transition-all animate-pulse"
+              >
+                <ArrowUpCircle size={12} />
+                Update to v{updateInfo.latest_version}
+              </button>
+            )}
+          </div>
         </div>
       </section>
 

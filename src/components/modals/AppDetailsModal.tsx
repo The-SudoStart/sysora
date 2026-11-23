@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { X, ExternalLink, HardDrive, Info, Trash2, AppWindow } from "lucide-react";
 import type { AppInfo } from "@/types";
+import { api } from "@/lib/api";
 
 interface Props {
   app: AppInfo;
@@ -13,11 +14,9 @@ function AppIcon({ icon_path, className = "w-12 h-12 object-contain" }: { icon_p
 
   useEffect(() => {
     if (icon_path) {
-      import("@/lib/api").then(({ api }) => {
-        api.getAppIconDataUrl(icon_path)
-          .then(setSrc)
-          .catch(() => setSrc(null));
-      });
+      api.getAppIconDataUrl(icon_path)
+        .then(setSrc)
+        .catch(() => setSrc(null));
     }
   }, [icon_path]);
 

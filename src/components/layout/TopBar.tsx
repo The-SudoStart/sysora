@@ -13,7 +13,7 @@ const TAB_TITLES: Record<string, string> = {
 };
 
 export function TopBar() {
-  const { activeTab, searchQuery, setSearchQuery } = useAppStore();
+  const { activeTab, searchQuery, setSearchQuery, updateInfo, setIsUpdateModalOpen } = useAppStore();
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   
   const showSearch = ["memory", "processes", "apps"].includes(activeTab);
@@ -38,6 +38,17 @@ export function TopBar() {
       )}
 
       <div className="ml-auto flex items-center gap-3">
+        {updateInfo?.update_available && (
+          <button
+            onClick={() => setIsUpdateModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-bold bg-brand-600 hover:bg-brand-500 text-white rounded-lg shadow-sm border border-brand-400/30 transition-all animate-pulse"
+            title="A new version of Sysora is available"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-white" />
+            Update {updateInfo.latest_version ? `v${updateInfo.latest_version}` : "Available"}
+          </button>
+        )}
+
         <div className="flex items-center gap-1.5">
           <Circle size={6} className="fill-emerald-400 text-emerald-400 animate-pulse-slow" />
           <span className="text-[11px] text-surface-400 dark:text-white/30">

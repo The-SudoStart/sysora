@@ -43,6 +43,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "../install-scripts/*"
+    ],
     "category": "Utility",
     "shortDescription": "Cross-platform system monitor & manager",
     "longDescription": "Sysora lets you monitor memory, CPU, disk, and battery health. Kill hungry processes, manage installed apps, scan disk usage, and inspect full system specs — all from a modern dashboard with a tray icon.",
