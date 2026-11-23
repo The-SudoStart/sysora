@@ -1885,7 +1885,7 @@ pub fn run() {
                 &[&toggle, &sep1, &sys_info, &settings, &sep2, &quit],
             )?;
 
-            let _tray = TrayIconBuilder::new()
+            if let Err(e) = TrayIconBuilder::new()
                 .menu(&menu)
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Sysora — System Monitor")
@@ -1937,7 +1937,10 @@ pub fn run() {
                         }
                     }
                 })
-                .build(app)?;
+                .build(app)
+            {
+                eprintln!("Warning: Failed to initialize tray icon: {e}");
+            }
 
             // Check for updates asynchronously in background on startup
             updater::start_background_update_checker(app.handle().clone());

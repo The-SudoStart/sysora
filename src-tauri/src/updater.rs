@@ -226,7 +226,7 @@ pub async fn run_app_update(app: AppHandle) -> Result<(), String> {
     // Forward stdout
     let app_out = app.clone();
     let tx1 = tx_log.clone();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             let _ = tx1.send(line.clone());
@@ -243,7 +243,7 @@ pub async fn run_app_update(app: AppHandle) -> Result<(), String> {
     // Forward stderr
     let app_err = app.clone();
     let tx2 = tx_log;
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut reader = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
             let _ = tx2.send(line.clone());
@@ -264,7 +264,7 @@ pub async fn run_app_update(app: AppHandle) -> Result<(), String> {
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("update.log");
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if let Ok(mut file) = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -333,7 +333,7 @@ pub fn notify_update_available(#[allow(unused_variables)] app: &AppHandle, lates
 
 /// Spawns a background check on startup.
 pub fn start_background_update_checker(app: AppHandle) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         // Wait 5 seconds after startup before checking
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
