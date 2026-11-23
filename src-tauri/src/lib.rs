@@ -15,7 +15,8 @@ const HISTORY_BUFFER_SIZE: usize = 60;
 mod db;
 use db::{DbManager, HistoricalPoint};
 
-mod updater;
+pub mod elevation;
+pub mod updater;
 
 // ─── Shared system state ────────────────────────────────────────────────────
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -471,9 +472,23 @@ fn get_processes(state: State<SysState>) -> Vec<ProcessInfo> {
 }
 
 /// Kills a process by PID and all sibling processes sharing the same name.
-/// This handles multi-process apps (browsers, Electron apps) where a single
-/// PID kill leaves other instances running.
-/// Falls back to elevated killall if normal kill is denied.
+pub fn get_app_stem(name: &str) -> String {
+    let mut stem = name.to_lowercase();
+    if let Some(s) = stem.strip_suffix(".exe") {
+        stem = s.to_string();
+    }
+    for suffix in &["-stable", "-bin", "-browser", "-default", "_bin"] {
+        if let Some(s) = stem.strip_suffix(suffix) {
+            stem = s.to_string();
+        }
+    }
+    stem
+}
+
+/// Robust process termination for both single and multi-process applications
+/// (e.g., Brave, Zen, Chrome, Firefox, Electron apps).
+/// Terminates process groups, descendant process trees, and all matching sibling processes,
+/// and verifies termination before confirming success.
 #[tauri::command]
 fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
     // Validate PID range: 0 is invalid; Linux max is 4194304 (2^22)
@@ -488,70 +503,119 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
     let mut sys = state.sys.lock().unwrap();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-    // Capture the process name before killing so we can find siblings
-    let proc_name = sys
-        .process(sysinfo::Pid::from_u32(pid))
-        .map(|p| p.name().to_string_lossy().to_string());
-
-    let Some(name) = proc_name else {
+    let target_proc = sys.process(sysinfo::Pid::from_u32(pid));
+    let Some(proc) = target_proc else {
         return Err(format!("Process with PID {} not found or already terminated", pid));
     };
 
-    // Kill every process sharing this name (covers multi-process browsers etc.)
-    let matching_pids: Vec<u32> = sys
-        .processes()
-        .values()
-        .filter(|p| p.name().to_string_lossy() == name)
-        .map(|p| p.pid().as_u32())
-        .collect();
+    let raw_name = proc.name().to_string_lossy().to_string();
+    let exe_path = proc.exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    let app_stem = get_app_stem(&raw_name);
 
-    let mut killed_any = false;
-    let mut needs_elevation = false;
+    // Collect all related PIDs:
+    // 1. Target PID
+    // 2. All child & descendant processes
+    // 3. Sibling processes sharing the same app stem or executable path
+    let mut pids_to_kill = std::collections::HashSet::new();
+    pids_to_kill.insert(pid);
 
-    for p_pid in &matching_pids {
-        if let Some(p) = sys.process(sysinfo::Pid::from_u32(*p_pid)) {
-            if p.kill() {
-                killed_any = true;
-            } else {
-                needs_elevation = true;
+    let mut queue = vec![pid];
+    while let Some(parent) = queue.pop() {
+        for (p_pid, p) in sys.processes() {
+            if let Some(pp) = p.parent() {
+                if pp.as_u32() == parent {
+                    let child_pid = p_pid.as_u32();
+                    if pids_to_kill.insert(child_pid) {
+                        queue.push(child_pid);
+                    }
+                }
             }
         }
     }
 
-    if killed_any && !needs_elevation {
+    if !app_stem.is_empty() && app_stem.len() >= 3 {
+        for (p_pid, p) in sys.processes() {
+            let p_name = p.name().to_string_lossy();
+            let p_stem = get_app_stem(&p_name);
+            let p_exe = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+
+            if p_stem == app_stem || (!p_exe.is_empty() && !exe_path.is_empty() && p_exe == exe_path) {
+                pids_to_kill.insert(p_pid.as_u32());
+            }
+        }
+    }
+
+    // Direct termination pass: process group & collected PIDs
+    #[cfg(unix)]
+    {
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if pgid > 1 {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+
+        for p_pid in &pids_to_kill {
+            unsafe {
+                libc::kill(*p_pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        for p_pid in &pids_to_kill {
+            if let Some(p) = sys.process(sysinfo::Pid::from_u32(*p_pid)) {
+                let _ = p.kill();
+            }
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
         return Ok(());
     }
 
-    // Elevated fallback — killall by name handles remaining instances at once
+    // Elevated fallback if direct kill was denied or protected
     use std::process::Command;
 
     #[cfg(target_os = "linux")]
     {
         let by_name = Command::new("pkexec")
-            .args(["killall", "-9", &name])
+            .args(["killall", "-9", &raw_name])
             .status();
         if by_name.map(|s| s.success()).unwrap_or(false) {
             return Ok(());
         }
-        // Last resort: elevate kill on the original PID
+        if !app_stem.is_empty() && app_stem != raw_name {
+            let _ = Command::new("pkexec")
+                .args(["killall", "-9", &app_stem])
+                .status();
+        }
         let status = Command::new("pkexec")
             .args(["kill", "-9", &pid_str])
             .status()
             .map_err(|e| e.to_string())?;
-        if status.success() { return Ok(()); }
+        if status.success() {
+            return Ok(());
+        }
     }
 
     #[cfg(target_os = "macos")]
     {
         let script = format!(
-            "do shell script \"killall -9 '{}'\" with administrator privileges",
-            name.replace('\'', "'\\''")
+            "do shell script \"killall -9 '{}' || kill -9 {}\" with administrator privileges",
+            raw_name.replace('\'', "'\\''"),
+            pid
         );
         let status = Command::new("osascript")
             .args(["-e", &script])
             .status()
             .map_err(|e| e.to_string())?;
-        if status.success() { return Ok(()); }
+        if status.success() {
+            return Ok(());
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -560,25 +624,135 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
             .args([
                 "-Command",
                 &format!(
-                    "Start-Process taskkill -ArgumentList '/F', '/IM', '{}.exe' -Verb RunAs -WindowStyle Hidden -Wait",
-                    name
-                )
+                    "Start-Process taskkill -ArgumentList '/F', '/T', '/PID', '{}' -Verb RunAs -WindowStyle Hidden -Wait",
+                    pid
+                ),
             ])
             .status()
             .map_err(|e| e.to_string())?;
-        if status.success() { return Ok(()); }
+        if status.success() {
+            return Ok(());
+        }
     }
 
-    if killed_any {
-        Ok(()) // At least some instances were killed
+    // Verify termination before confirming to UI
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
+        Ok(())
     } else {
         Err(format!(
-            "Failed to kill '{}'. The process may be protected by the system.",
-            name
+            "Failed to terminate '{}' (PID {}). The process may be protected by the system.",
+            raw_name, pid
         ))
     }
 }
 
+#[cfg(target_os = "macos")]
+fn get_authoritative_macos_ram() -> u64 {
+    use std::mem;
+    let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
+    let mut memsize: u64 = 0;
+    let mut len = mem::size_of::<u64>();
+    unsafe {
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            &mut memsize as *mut u64 as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        ) == 0
+            && memsize > 0
+        {
+            return memsize;
+        }
+    }
+    0
+}
+
+/// Returns authoritative physical RAM in bytes across all platforms.
+pub fn get_total_ram(sys: &System) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let hw_mem = get_authoritative_macos_ram();
+        if hw_mem > 0 {
+            return hw_mem;
+        }
+    }
+    sys.total_memory()
+}
+
+/// Identifies valid user storage partitions and filters out duplicate internal APFS
+/// container mounts (macOS) and virtual/loop mounts (Linux).
+pub fn is_valid_user_disk(name: &str, mount: &str, file_system: &str) -> bool {
+    let _ = name;
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS APFS, '/' is the root system volume while subvolumes under '/System/Volumes/'
+        // (Data, VM, Preboot, Update, Hardware, etc.) all share the identical APFS container space.
+        // Summing them doubles or triples reported storage (e.g. 512GB -> 1TB).
+        if mount.starts_with("/System/Volumes") {
+            return false;
+        }
+        if matches!(file_system, "devfs" | "autofs" | "nullfs") {
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if mount.starts_with("/snap")
+            || mount.starts_with("/sys")
+            || mount.starts_with("/proc")
+            || mount.starts_with("/dev")
+            || mount.starts_with("/run")
+            || mount.starts_with("/var/lib/docker")
+            || mount.starts_with("/var/lib/flatpak")
+        {
+            return false;
+        }
+        if matches!(file_system, "squashfs" | "tmpfs" | "devtmpfs" | "overlay" | "ramfs") {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Returns clean, deduplicated, physical and mounted user partitions.
+pub fn get_filtered_disks() -> Vec<DiskInfo> {
+    let disks = Disks::new_with_refreshed_list();
+    let mut seen_mounts = std::collections::HashSet::new();
+    let mut result = Vec::new();
+
+    for d in disks.iter() {
+        let name = d.name().to_string_lossy().to_string();
+        let mount = d.mount_point().to_string_lossy().to_string();
+        let file_system = d.file_system().to_string_lossy().to_string();
+
+        if !is_valid_user_disk(&name, &mount, &file_system) {
+            continue;
+        }
+
+        if !seen_mounts.insert(mount.clone()) {
+            continue;
+        }
+
+        let total = d.total_space();
+        let avail = d.available_space();
+        result.push(DiskInfo {
+            name,
+            mount,
+            total_bytes: total,
+            available_bytes: avail,
+            used_bytes: total.saturating_sub(avail),
+            file_system,
+            removable: d.is_removable(),
+        });
+    }
+
+    result
+}
 
 /// Returns a full system snapshot (RAM, CPU, OS info, uptime).
 #[tauri::command]
@@ -596,9 +770,13 @@ fn get_system_info(state: State<SysState>) -> SystemSnapshot {
         .first()
         .map(|c| c.brand().to_string())
         .unwrap_or_default();
+
+    let total_memory = get_total_ram(&sys);
+    let used_memory = sys.used_memory().min(total_memory);
+
     SystemSnapshot {
-        total_memory: sys.total_memory(),
-        used_memory: sys.used_memory(),
+        total_memory,
+        used_memory,
         total_swap: sys.total_swap(),
         used_swap: sys.used_swap(),
         cpu_usage,
@@ -631,23 +809,7 @@ fn get_system_info(state: State<SysState>) -> SystemSnapshot {
 /// Returns all mounted disks.
 #[tauri::command]
 fn get_disks() -> Vec<DiskInfo> {
-    let disks = Disks::new_with_refreshed_list();
-    disks
-        .iter()
-        .map(|d| {
-            let total = d.total_space();
-            let avail = d.available_space();
-            DiskInfo {
-                name: d.name().to_string_lossy().to_string(),
-                mount: d.mount_point().to_string_lossy().to_string(),
-                total_bytes: total,
-                available_bytes: avail,
-                used_bytes: total.saturating_sub(avail),
-                file_system: d.file_system().to_string_lossy().to_string(),
-                removable: d.is_removable(),
-            }
-        })
-        .collect()
+    get_filtered_disks()
 }
 
 /// Returns all network interfaces and their current stats.
@@ -741,18 +903,18 @@ fn export_report(state: State<SysState>, path: String) -> Result<(), String> {
     let cpu_brand = sys.cpus().first().map(|c| c.brand().to_string()).unwrap_or_default();
     let cpu_cores = sys.cpus().len();
     
-    let total_ram = sys.total_memory();
-    let used_ram = sys.used_memory();
+    let total_ram = get_total_ram(&sys);
+    let used_ram = sys.used_memory().min(total_ram);
     
     let battery = read_battery();
     
     let mut disks_data = Vec::new();
-    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disks = get_filtered_disks();
     for disk in &disks {
         disks_data.push((
-            disk.mount_point().to_string_lossy().to_string(),
-            disk.total_space(),
-            disk.available_space(),
+            disk.mount.clone(),
+            disk.total_bytes,
+            disk.available_bytes,
         ));
     }
 
@@ -1066,19 +1228,21 @@ fn get_tray_snapshot(state: State<SysState>) -> TraySnapshot {
     } else {
         0.0
     };
-    let disks = Disks::new_with_refreshed_list();
+    let disks = get_filtered_disks();
     let (total_disk, used_disk) = disks.iter().fold((0u64, 0u64), |(t, u), d| {
-        (t + d.total_space(), u + d.total_space().saturating_sub(d.available_space()))
+        (t + d.total_bytes, u + d.used_bytes)
     });
     let disk_used_pct = if total_disk > 0 {
         used_disk as f32 / total_disk as f32 * 100.0
     } else {
         0.0
     };
+    let total_memory = get_total_ram(&sys);
+    let used_memory = sys.used_memory().min(total_memory);
     TraySnapshot {
         cpu_usage,
-        used_memory: sys.used_memory(),
-        total_memory: sys.total_memory(),
+        used_memory,
+        total_memory,
         battery: read_battery(),
         disk_used_pct,
         network: {
@@ -1465,8 +1629,8 @@ async fn start_refresh_loop(app: AppHandle) {
         };
 
         // Check RAM usage
-        let total_mem = sys.total_memory();
-        let used_mem = sys.used_memory();
+        let total_mem = get_total_ram(&sys);
+        let used_mem = sys.used_memory().min(total_mem);
         let ram_usage = if total_mem > 0 {
             (used_mem as f32 / total_mem as f32) * 100.0
         } else {
@@ -1565,13 +1729,12 @@ async fn start_refresh_loop(app: AppHandle) {
 
         // ─── Database recording (1m interval) ───
         if last_db_snapshot.elapsed() >= StdDuration::from_secs(60) {
-            let mut disks = sysinfo::Disks::new_with_refreshed_list();
-            disks.refresh(true);
+            let disks = get_filtered_disks();
             let mut disk_used = 0;
             let mut disk_total = 0;
-            for d in disks.iter() {
-                disk_total += d.total_space();
-                disk_used += d.total_space() - d.available_space();
+            for d in &disks {
+                disk_total += d.total_bytes;
+                disk_used += d.used_bytes;
             }
 
             let max_temp = {
@@ -1656,6 +1819,8 @@ fn get_app_icon_data_url(path: String) -> Result<String, String> {
 // ─── App entry point ─────────────────────────────────────────────────────────
 
 pub fn run() {
+    elevation::elevate_privileges();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1809,4 +1974,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running sysora");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_app_stem() {
+        assert_eq!(get_app_stem("brave-browser-stable"), "brave");
+        assert_eq!(get_app_stem("brave"), "brave");
+        assert_eq!(get_app_stem("zen-bin"), "zen");
+        assert_eq!(get_app_stem("google-chrome-stable"), "google-chrome");
+        assert_eq!(get_app_stem("firefox.exe"), "firefox");
+        assert_eq!(get_app_stem("code-bin"), "code");
+    }
+
+    #[test]
+    fn test_is_valid_user_disk_filtering() {
+        // macOS APFS tests
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_valid_user_disk("Macintosh HD", "/", "apfs"));
+            assert!(!is_valid_user_disk("Macintosh HD - Data", "/System/Volumes/Data", "apfs"));
+            assert!(!is_valid_user_disk("VM", "/System/Volumes/VM", "apfs"));
+            assert!(!is_valid_user_disk("Preboot", "/System/Volumes/Preboot", "apfs"));
+            assert!(!is_valid_user_disk("devfs", "/dev", "devfs"));
+            assert!(is_valid_user_disk("External", "/Volumes/External", "exfat"));
+        }
+
+        // Linux tests
+        #[cfg(target_os = "linux")]
+        {
+            assert!(is_valid_user_disk("root", "/", "ext4"));
+            assert!(!is_valid_user_disk("snap-core", "/snap/core/1234", "squashfs"));
+            assert!(!is_valid_user_disk("sysfs", "/sys", "sysfs"));
+            assert!(!is_valid_user_disk("tmpfs", "/run/user/1000", "tmpfs"));
+        }
+    }
 }

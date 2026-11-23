@@ -4309,6 +4309,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "libc",
  "plist",
  "printpdf",
  "rusqlite",

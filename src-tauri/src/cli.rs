@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use colored::*;
-use sysinfo::{System, Components, Disks};
+use sysinfo::{System, Components};
 use sysora_lib::*;
 use serde_json;
 
@@ -19,6 +19,14 @@ pub struct Cli {
     /// Hidden arg for compatibility with GUI autostart
     #[arg(long, hide = true)]
     pub minimized: bool,
+
+    /// Hidden arg for GUI privilege elevation tracking
+    #[arg(long, hide = true)]
+    pub parent_pid: Option<u32>,
+
+    /// Run without privilege elevation prompt
+    #[arg(long)]
+    pub no_elevation: bool,
 }
 
 #[derive(Subcommand)]
@@ -72,7 +80,7 @@ fn show_status(json: bool) {
         sys.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>() / cpu_count as f32
     } else { 0.0 };
     
-    let total_mem = sys.total_memory();
+    let total_mem = get_total_ram(&sys);
     let used_mem = sys.used_memory();
     let mem_pct = if total_mem > 0 { (used_mem as f32 / total_mem as f32) * 100.0 } else { 0.0 };
 
@@ -80,13 +88,12 @@ fn show_status(json: bool) {
     comps.refresh(true);
     let max_temp = comps.iter().filter_map(|c| c.temperature()).fold(0.0, f32::max);
     
-    let mut disks = Disks::new_with_refreshed_list();
-    disks.refresh(true);
+    let disks = get_filtered_disks();
     let mut disk_used = 0;
     let mut disk_total = 0;
-    for d in disks.iter() {
-        disk_total += d.total_space();
-        disk_used += d.total_space() - d.available_space();
+    for d in &disks {
+        disk_total += d.total_bytes;
+        disk_used += d.used_bytes;
     }
     let disk_pct = if disk_total > 0 { (disk_used as f64 / disk_total as f64) * 100.0 } else { 0.0 };
 
@@ -218,16 +225,15 @@ fn show_processes(top_n: usize, json: bool) {
 }
 
 fn show_disk(json: bool) {
-    let mut disks = Disks::new_with_refreshed_list();
-    disks.refresh(true);
+    let disks = get_filtered_disks();
     
     if json {
         println!("{}", serde_json::to_string_pretty(&disks.iter().map(|d| {
             serde_json::json!({
-                "name": d.name().to_string_lossy(),
-                "mount": d.mount_point().to_string_lossy(),
-                "total_bytes": d.total_space(),
-                "available_bytes": d.available_space()
+                "name": &d.name,
+                "mount": &d.mount,
+                "total_bytes": d.total_bytes,
+                "available_bytes": d.available_bytes
             })
         }).collect::<Vec<_>>()).unwrap());
         return;
@@ -235,14 +241,13 @@ fn show_disk(json: bool) {
 
     println!("{:<15} {:<20} {:<15} {:<10}", "NAME".bold(), "MOUNT".bold(), "USAGE".bold(), "FREE".bold());
     println!("{}", "─".repeat(65).dimmed());
-    for d in disks.iter() {
-        let used = d.total_space() - d.available_space();
-        let pct = if d.total_space() > 0 { (used as f64 / d.total_space() as f64) * 100.0 } else { 0.0 };
+    for d in &disks {
+        let pct = if d.total_bytes > 0 { (d.used_bytes as f64 / d.total_bytes as f64) * 100.0 } else { 0.0 };
         println!("{:<15} {:<20} {:<15} {:<10}", 
-            d.name().to_string_lossy().truncate(14),
-            d.mount_point().to_string_lossy().truncate(19),
-            format!("{} ({:.0}%)", fmt_bytes(used), pct),
-            fmt_bytes(d.available_space())
+            d.name.truncate(14),
+            d.mount.truncate(19),
+            format!("{} ({:.0}%)", fmt_bytes(d.used_bytes), pct),
+            fmt_bytes(d.available_bytes)
         );
     }
 }
