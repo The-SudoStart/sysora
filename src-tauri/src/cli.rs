@@ -6,7 +6,7 @@ use serde_json;
 
 #[derive(Parser)]
 #[command(name = "sysora")]
-#[command(version = "0.3.0")]
+#[command(version = "0.4.0")]
 #[command(about = "Sysora CLI — System monitoring from your terminal", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -117,7 +117,7 @@ fn show_status(json: bool) {
 
     println!("{} {} · {} {} · hostname: {}", 
         "Sysora".brand_color(), 
-        "v0.3.0".dimmed(),
+        format!("v{}", env!("CARGO_PKG_VERSION")).dimmed(),
         System::name().unwrap_or_default().cyan(),
         System::os_version().unwrap_or_default().cyan(),
         System::host_name().unwrap_or_default().yellow()
