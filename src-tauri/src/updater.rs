@@ -14,6 +14,7 @@ pub struct UpdateInfo {
     pub latest_version: Option<String>,
     pub update_available: bool,
     pub release_notes: Option<String>,
+    pub download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,7 +113,8 @@ pub fn is_matching_platform_asset(asset_name: &str) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        if !lower.ends_with(".exe") && !lower.ends_with(".msi") {
+        // Only accept Windows .exe installer; do not offer .msi which windows.ps1 cannot process
+        if !lower.ends_with(".exe") {
             return false;
         }
         #[cfg(target_arch = "x86_64")]
@@ -137,7 +139,7 @@ pub fn is_matching_platform_asset(asset_name: &str) -> bool {
 
 /// Fetch the latest verified release from GitHub Releases API.
 /// Only offers an update if release assets exist for the current platform and architecture.
-pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
+pub async fn fetch_latest_release() -> Option<(String, Option<String>, Option<String>)> {
     if let Some(json_str) = fetch_curl_output(RELEASES_API_URL, &["User-Agent: Sysora"]).await {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
             if json.get("draft").and_then(|d| d.as_bool()).unwrap_or(false) {
@@ -150,24 +152,28 @@ pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
                 return None;
             }
 
-            // Verify a matching release asset exists for this platform and CPU architecture
-            let has_asset = json
+            // Find matching release asset for this platform and CPU architecture
+            let matching_asset = json
                 .get("assets")
                 .and_then(|a| a.as_array())
-                .map(|assets| {
-                    assets.iter().any(|asset| {
+                .and_then(|assets| {
+                    assets.iter().find(|asset| {
                         asset
                             .get("name")
                             .and_then(|n| n.as_str())
                             .map(is_matching_platform_asset)
                             .unwrap_or(false)
                     })
-                })
-                .unwrap_or(false);
+                });
 
-            if !has_asset {
+            let Some(asset_obj) = matching_asset else {
                 return None;
-            }
+            };
+
+            let download_url = asset_obj
+                .get("browser_download_url")
+                .and_then(|u| u.as_str())
+                .map(|s| s.to_string());
 
             let release_notes = json
                 .get("body")
@@ -175,7 +181,7 @@ pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string());
 
-            return Some((clean_tag, release_notes));
+            return Some((clean_tag, release_notes, download_url));
         }
     }
 
@@ -200,6 +206,7 @@ pub fn evaluate_update(
     current: &str,
     latest: Option<&str>,
     release_notes: Option<String>,
+    download_url: Option<String>,
 ) -> UpdateInfo {
     let update_available = match (latest, parse_version(current)) {
         (Some(latest_ver), Some(cur)) => {
@@ -213,6 +220,7 @@ pub fn evaluate_update(
         latest_version: latest.map(|s| s.trim_start_matches('v').to_string()),
         update_available,
         release_notes,
+        download_url,
     }
 }
 
@@ -220,11 +228,11 @@ pub fn evaluate_update(
 pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
     let current = get_local_version(&app);
     let release = fetch_latest_release().await;
-    let (latest_ver, notes) = match release {
-        Some((ver, notes)) => (Some(ver), notes),
-        None => (None, None),
+    let (latest_ver, notes, download_url) = match release {
+        Some((ver, notes, url)) => (Some(ver), notes, url),
+        None => (None, None, None),
     };
-    Ok(evaluate_update(&current, latest_ver.as_deref(), notes))
+    Ok(evaluate_update(&current, latest_ver.as_deref(), notes, download_url))
 }
 
 fn get_update_script_name() -> &'static str {
@@ -281,7 +289,7 @@ fn resolve_script(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
-fn build_update_command(resolved_path: &Path) -> Command {
+fn build_update_command(resolved_path: &Path, download_url: Option<&str>) -> Command {
     #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new("powershell");
@@ -292,6 +300,9 @@ fn build_update_command(resolved_path: &Path) -> Command {
             "-File",
             &resolved_path.to_string_lossy(),
         ]);
+        if let Some(url) = download_url {
+            cmd.args(["-DownloadUrl", url]);
+        }
         cmd
     }
 
@@ -299,14 +310,17 @@ fn build_update_command(resolved_path: &Path) -> Command {
     {
         let mut cmd = Command::new("bash");
         cmd.arg(resolved_path);
+        if let Some(url) = download_url {
+            cmd.arg(url);
+        }
         cmd
     }
 }
 
 #[tauri::command]
-pub async fn run_app_update(app: AppHandle) -> Result<(), String> {
+pub async fn run_app_update(app: AppHandle, download_url: Option<String>) -> Result<(), String> {
     let script_path = resolve_script(&app)?;
-    let mut cmd = build_update_command(&script_path);
+    let mut cmd = build_update_command(&script_path, download_url.as_deref());
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -436,8 +450,8 @@ pub fn start_background_update_checker(app: AppHandle) {
 
         loop {
             let current = get_local_version(&app);
-            if let Some((latest, notes)) = fetch_latest_release().await {
-                let info = evaluate_update(&current, Some(&latest), notes);
+            if let Some((latest, notes, url)) = fetch_latest_release().await {
+                let info = evaluate_update(&current, Some(&latest), notes, url);
                 if info.update_available {
                     notify_update_available(&app, &latest);
                     let _ = app.emit("update-available", &info);
@@ -465,19 +479,28 @@ mod tests {
 
     #[test]
     fn test_evaluate_update() {
-        let update = evaluate_update("0.3.0", Some("0.3.1"), Some("Bug fixes".to_string()));
+        let update = evaluate_update(
+            "0.3.0",
+            Some("0.3.1"),
+            Some("Bug fixes".to_string()),
+            Some("https://example.com/asset".to_string()),
+        );
         assert!(update.update_available);
         assert_eq!(update.current_version, "0.3.0");
         assert_eq!(update.latest_version, Some("0.3.1".to_string()));
         assert_eq!(update.release_notes, Some("Bug fixes".to_string()));
+        assert_eq!(
+            update.download_url,
+            Some("https://example.com/asset".to_string())
+        );
 
-        let same = evaluate_update("0.3.0", Some("0.3.0"), None);
+        let same = evaluate_update("0.3.0", Some("0.3.0"), None, None);
         assert!(!same.update_available);
 
-        let older = evaluate_update("0.3.2", Some("0.3.1"), None);
+        let older = evaluate_update("0.3.2", Some("0.3.1"), None, None);
         assert!(!older.update_available);
 
-        let none = evaluate_update("0.3.0", None, None);
+        let none = evaluate_update("0.3.0", None, None, None);
         assert!(!none.update_available);
     }
 
@@ -508,6 +531,7 @@ mod tests {
         #[cfg(target_os = "windows")]
         {
             assert!(is_matching_platform_asset("Sysora_0.4.0_x64-setup.exe"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0.msi"));
             assert!(!is_matching_platform_asset("Sysora_0.4.0_amd64.deb"));
         }
     }

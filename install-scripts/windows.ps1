@@ -1,5 +1,6 @@
 param(
-    [string]$Version = "latest"
+    [string]$Version = "latest",
+    [string]$DownloadUrl = ""
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -9,27 +10,50 @@ $ProgressPreference = 'SilentlyContinue'
 $Repo = "The-SudoStart/sysora"
 Write-Output "📥 Checking for latest Sysora release for Windows..."
 
-if ($Version -eq "latest") {
-    $Response = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing
-    if ($Response.StatusCode -in 301, 302) {
-        $Tag = ($Response.Headers.Location -split '/')[-1]
+$Arch = if ([System.Environment]::Is64BitOperatingSystem) {
+    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+} else { "x86" }
+
+if (-not $DownloadUrl) {
+    if ($Version -eq "latest") {
+        $Response = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing
+        if ($Response.StatusCode -in 301, 302) {
+            $Tag = ($Response.Headers.Location -split '/')[-1]
+        } else {
+            $ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+            $Tag = (Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing).tag_name
+        }
     } else {
-        $ApiUrl = "https://api.github.com/repos/$Repo/releases/latest"
-        $Tag = (Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing).tag_name
+        $Tag = $Version
     }
-} else {
-    $Tag = $Version
+
+    if (-not $Tag) {
+        Write-Output "Error: Could not determine version tag."
+        exit 1
+    }
+
+    $Ver = $Tag.TrimStart('v')
+    $Tag = "v$Ver"
+
+    # Search release assets for exact architecture-matched setup.exe
+    $ApiUrl = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+    try {
+        $Release = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing
+        $Matched = $Release.assets | Where-Object { $_.name -like "*${Arch}*-setup.exe" -or $_.name -like "*${Arch}*.exe" } | Select-Object -First 1
+        if ($Matched) {
+            $DownloadUrl = $Matched.browser_download_url
+        }
+    } catch {
+        $DownloadUrl = "https://github.com/$Repo/releases/download/$Tag/Sysora_${Ver}_${Arch}-setup.exe"
+    }
 }
 
-if (-not $Tag) {
-    Write-Output "Error: Could not determine version tag."
+if (-not $DownloadUrl) {
+    Write-Output "Error: No installer executable found for Windows ($Arch) in release."
     exit 1
 }
 
-$Ver = $Tag.TrimStart('v')
-$Tag = "v$Ver"
-
-$DownloadUrl = "https://github.com/$Repo/releases/download/$Tag/Sysora_${Ver}_x64-setup.exe"
+$Ver = if ($Tag) { $Tag.TrimStart('v') } else { "update" }
 $TempPath = Join-Path $env:TEMP "Sysora_${Ver}_setup.exe"
 
 Write-Output "🔍 Checking release asset: $DownloadUrl"

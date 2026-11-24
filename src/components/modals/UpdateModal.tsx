@@ -86,7 +86,7 @@ export function UpdateModal() {
     ]);
 
     try {
-      await api.runAppUpdate();
+      await api.runAppUpdate(updateInfo?.download_url);
       setStatus("completed");
       setCountdown(3);
       // Re-fetch update info to refresh state

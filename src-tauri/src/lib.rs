@@ -533,30 +533,37 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
         }
     }
 
-    if !app_stem.is_empty() && app_stem.len() >= 3 {
-        for (p_pid, p) in sys.processes() {
-            let p_name = p.name().to_string_lossy();
-            let p_stem = get_app_stem(&p_name);
-            let p_exe = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    let target_uid = proc.user_id();
+    let is_generic_interpreter = ["python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "java"]
+        .iter()
+        .any(|intp| raw_name == *intp || app_stem == *intp);
 
-            if p_stem == app_stem || (!p_exe.is_empty() && !exe_path.is_empty() && p_exe == exe_path) {
+    if !is_generic_interpreter && !exe_path.is_empty() {
+        for (p_pid, p) in sys.processes() {
+            // Sibling instances must be owned by the same user to prevent collateral termination
+            if p.user_id() != target_uid {
+                continue;
+            }
+            let p_exe = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+            if p_exe == exe_path {
                 pids_to_kill.insert(p_pid.as_u32());
             }
         }
     }
 
-    // Enumerate process group members, validating that each belongs to the target app before targeting
+    // Enumerate process group members, validating ownership and executable identity before targeting
     #[cfg(unix)]
     {
         let target_pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
         if target_pgid > 1 {
             for (p_pid, p) in sys.processes() {
+                if p.user_id() != target_uid {
+                    continue;
+                }
                 let proc_pgid = unsafe { libc::getpgid(p_pid.as_u32() as libc::pid_t) };
                 if proc_pgid == target_pgid {
-                    let p_name = p.name().to_string_lossy();
-                    let p_stem = get_app_stem(&p_name);
                     let p_exe = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-                    if p_stem == app_stem || (!p_exe.is_empty() && !exe_path.is_empty() && p_exe == exe_path) {
+                    if !exe_path.is_empty() && p_exe == exe_path {
                         pids_to_kill.insert(p_pid.as_u32());
                     }
                 }
@@ -602,19 +609,11 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
         return Ok(());
     }
 
-    // Elevated fallback if direct kill was denied or protected
+    // Elevated fallback: strictly target only verified remaining PIDs
     use std::process::Command;
 
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("pkexec")
-            .args(["killall", "-9", &raw_name])
-            .status();
-        if !app_stem.is_empty() && app_stem != raw_name {
-            let _ = Command::new("pkexec")
-                .args(["killall", "-9", &app_stem])
-                .status();
-        }
         for rem_pid in &remaining_pids {
             let _ = Command::new("pkexec")
                 .args(["kill", "-9", &rem_pid.to_string()])
@@ -630,8 +629,7 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
             .collect::<Vec<_>>()
             .join(" ");
         let script = format!(
-            "do shell script \"killall -9 '{}' 2>/dev/null; kill -9 {} 2>/dev/null || true\" with administrator privileges",
-            raw_name.replace('\'', "'\\''"),
+            "do shell script \"kill -9 {} 2>/dev/null || true\" with administrator privileges",
             rem_pids_str
         );
         let _ = Command::new("osascript")

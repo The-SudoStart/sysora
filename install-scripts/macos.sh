@@ -6,7 +6,10 @@ VERSION="${1:-latest}"
 
 echo "📥 Checking for latest Sysora release for macOS..."
 
-if [[ "$VERSION" = "latest" ]]; then
+if [[ "$VERSION" =~ ^https?:// ]]; then
+  DL_URL="$VERSION"
+  TAG=$(echo "$DL_URL" | grep -o 'download/[^/]*' | cut -d/ -f2)
+elif [[ "$VERSION" = "latest" ]]; then
   TAG=$(curl -sI "https://github.com/$REPO/releases/latest" | grep -i '^location:' | awk -F'/' '{print $NF}' | tr -d '\r\n')
   if [[ -z "$TAG" ]]; then
     TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d '"' -f 4)
@@ -24,16 +27,18 @@ VER="${TAG#v}"
 TAG="v${VER}"
 PKG_VER="${VER%%-rc.*}"
 
-DL_URL="https://github.com/$REPO/releases/download/${TAG}/Sysora_${PKG_VER}_universal.dmg"
+if [[ -z "${DL_URL:-}" ]]; then
+  DL_URL="https://github.com/$REPO/releases/download/${TAG}/Sysora_${PKG_VER}_universal.dmg"
 
-echo "🔍 Checking release asset: $DL_URL"
-if ! curl -sI -f "$DL_URL" > /dev/null; then
-  ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o '"browser_download_url": *"[^"]*universal\.dmg"' | head -1 | cut -d '"' -f 4 || true)
-  if [[ -n "$ALT_URL" ]]; then
-    DL_URL="$ALT_URL"
-  else
-    echo "❌ Could not find macOS DMG package in release $TAG"
-    exit 1
+  echo "🔍 Checking release asset: $DL_URL"
+  if ! curl -sI -f "$DL_URL" > /dev/null; then
+    ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o '"browser_download_url": *"[^"]*universal\.dmg"' | head -1 | cut -d '"' -f 4 || true)
+    if [[ -n "$ALT_URL" ]]; then
+      DL_URL="$ALT_URL"
+    else
+      echo "❌ Could not find macOS DMG package in release $TAG"
+      exit 1
+    fi
   fi
 fi
 
@@ -75,6 +80,22 @@ hdiutil attach "$TMP/Sysora.dmg" -mountpoint "$TMP/mount" -quiet
 APP_PATH=$(find "$TMP/mount" -maxdepth 1 -name "*.app" -print -quit)
 if [[ -z "$APP_PATH" ]] || [[ ! -f "$APP_PATH/Contents/Info.plist" ]]; then
   echo "❌ Could not find a valid Sysora.app bundle in mounted DMG"
+  hdiutil detach "$TMP/mount" -quiet
+  exit 1
+fi
+
+echo "🔍 Verifying publisher bundle identity..."
+BUNDLE_ID=$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+BUNDLE_EXE=$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleExecutable 2>/dev/null || true)
+
+if [[ "$BUNDLE_ID" != "sysora" && "$BUNDLE_ID" != "com.sysora"* ]]; then
+  echo "❌ Untrusted bundle identifier: '$BUNDLE_ID' (expected 'sysora')"
+  hdiutil detach "$TMP/mount" -quiet
+  exit 1
+fi
+
+if [[ "$BUNDLE_EXE" != "sysora" && "$BUNDLE_EXE" != "Sysora" ]]; then
+  echo "❌ Untrusted bundle executable: '$BUNDLE_EXE' (expected 'sysora')"
   hdiutil detach "$TMP/mount" -quiet
   exit 1
 fi

@@ -138,6 +138,7 @@ export interface UpdateInfo {
   latest_version: string | null;
   update_available: boolean;
   release_notes?: string | null;
+  download_url?: string | null;
 }
 
 export interface UpdateLogLine {

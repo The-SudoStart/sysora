@@ -43,6 +43,7 @@ export const api = {
   deletePath: (path: string) => invoke<void>("delete_path", { path }),
   getHistory: () => invoke<HistoryPoint[]>("get_history"),
   checkForUpdates: () => invoke<UpdateInfo>("check_for_updates"),
-  runAppUpdate: () => invoke<void>("run_app_update"),
+  runAppUpdate: (downloadUrl?: string | null) =>
+    invoke<void>("run_app_update", { downloadUrl: downloadUrl ?? null }),
   restartApp: () => invoke<void>("restart_app"),
 };
