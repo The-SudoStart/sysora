@@ -49,12 +49,22 @@ if [[ ! -s "$TMP/Sysora.dmg" ]]; then
 fi
 
 echo "🔍 Verifying package integrity..."
-if curl -fsSL "${DL_URL}.sha256" -o "$TMP/Sysora.dmg.sha256" 2>/dev/null; then
+if ! curl -fsSL "${DL_URL}.sha256" -o "$TMP/Sysora.dmg.sha256" 2>/dev/null; then
+  if [[ "${SYSORA_INSECURE_NO_CHECKSUM:-0}" = "1" ]]; then
+    echo "⚠️ Warning: Release checksum not found; proceeding because SYSORA_INSECURE_NO_CHECKSUM=1."
+  else
+    echo "❌ Required release checksum (${DL_URL}.sha256) could not be retrieved."
+    echo "   Failing closed to prevent installation of unverified package."
+    exit 1
+  fi
+else
   echo "🔐 Verifying SHA256 checksum..."
   EXPECTED_SHA=$(awk '{print $1}' "$TMP/Sysora.dmg.sha256")
   ACTUAL_SHA=$(shasum -a 256 "$TMP/Sysora.dmg" | awk '{print $1}')
-  if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+  if [[ -z "$EXPECTED_SHA" ]] || [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
     echo "❌ Checksum verification failed!"
+    echo "   Expected: $EXPECTED_SHA"
+    echo "   Actual:   $ACTUAL_SHA"
     exit 1
   fi
   echo "✅ Checksum verified."

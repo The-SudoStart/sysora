@@ -65,17 +65,78 @@ async fn fetch_curl_output(url: &str, headers: &[&str]) -> Option<String> {
     }
 }
 
-fn platform_asset_extension() -> &'static str {
-    #[cfg(target_os = "windows")]
-    { ".exe" }
+pub fn is_matching_platform_asset(asset_name: &str) -> bool {
+    let lower = asset_name.to_lowercase();
+
+    #[cfg(target_os = "linux")]
+    {
+        if !lower.ends_with(".deb") {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            lower.contains("amd64") || lower.contains("x86_64")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            lower.contains("arm64") || lower.contains("aarch64")
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            true
+        }
+    }
+
     #[cfg(target_os = "macos")]
-    { ".dmg" }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    { ".deb" }
+    {
+        if !lower.ends_with(".dmg") {
+            return false;
+        }
+        // Universal DMG runs on both Apple Silicon (aarch64) and Intel (x86_64)
+        if lower.contains("universal") {
+            return true;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            lower.contains("aarch64") || lower.contains("arm64")
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            lower.contains("x86_64") || lower.contains("x64") || lower.contains("intel")
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            true
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if !lower.ends_with(".exe") && !lower.ends_with(".msi") {
+            return false;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            lower.contains("x64") || lower.contains("x86_64") || lower.contains("amd64")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            lower.contains("arm64") || lower.contains("aarch64")
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            true
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
 }
 
 /// Fetch the latest verified release from GitHub Releases API.
-/// Only offers an update if release assets exist for the current platform.
+/// Only offers an update if release assets exist for the current platform and architecture.
 pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
     if let Some(json_str) = fetch_curl_output(RELEASES_API_URL, &["User-Agent: Sysora"]).await {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
@@ -89,8 +150,7 @@ pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
                 return None;
             }
 
-            // Verify a matching release asset exists for this platform
-            let ext = platform_asset_extension();
+            // Verify a matching release asset exists for this platform and CPU architecture
             let has_asset = json
                 .get("assets")
                 .and_then(|a| a.as_array())
@@ -99,7 +159,7 @@ pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
                         asset
                             .get("name")
                             .and_then(|n| n.as_str())
-                            .map(|name| name.ends_with(ext))
+                            .map(is_matching_platform_asset)
                             .unwrap_or(false)
                     })
                 })
@@ -419,6 +479,37 @@ mod tests {
 
         let none = evaluate_update("0.3.0", None, None);
         assert!(!none.update_available);
+    }
+
+    #[test]
+    fn test_is_matching_platform_asset() {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            assert!(is_matching_platform_asset("Sysora_0.4.0_amd64.deb"));
+            assert!(is_matching_platform_asset("Sysora_0.4.0_x86_64.deb"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0_arm64.deb"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0.dmg"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0.exe"));
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            assert!(is_matching_platform_asset("Sysora_0.4.0_arm64.deb"));
+            assert!(is_matching_platform_asset("Sysora_0.4.0_aarch64.deb"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0_amd64.deb"));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(is_matching_platform_asset("Sysora_0.4.0_universal.dmg"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0_amd64.deb"));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            assert!(is_matching_platform_asset("Sysora_0.4.0_x64-setup.exe"));
+            assert!(!is_matching_platform_asset("Sysora_0.4.0_amd64.deb"));
+        }
     }
 }
 

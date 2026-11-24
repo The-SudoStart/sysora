@@ -545,24 +545,32 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
         }
     }
 
+    // Enumerate process group members, validating that each belongs to the target app before targeting
+    #[cfg(unix)]
+    {
+        let target_pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if target_pgid > 1 {
+            for (p_pid, p) in sys.processes() {
+                let proc_pgid = unsafe { libc::getpgid(p_pid.as_u32() as libc::pid_t) };
+                if proc_pgid == target_pgid {
+                    let p_name = p.name().to_string_lossy();
+                    let p_stem = get_app_stem(&p_name);
+                    let p_exe = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+                    if p_stem == app_stem || (!p_exe.is_empty() && !exe_path.is_empty() && p_exe == exe_path) {
+                        pids_to_kill.insert(p_pid.as_u32());
+                    }
+                }
+            }
+        }
+    }
+
     // Ensure our own process is never targeted
     pids_to_kill.remove(&std::process::id());
 
-    // Direct termination pass: process group & collected PIDs
+    // Direct termination pass: send signals ONLY to the collected, validated target PIDs
     #[cfg(unix)]
     {
         let current_pid = std::process::id() as libc::pid_t;
-        let current_pgid = unsafe { libc::getpgid(current_pid) };
-        let target_pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-
-        // Only kill by PGID if the target process is the leader of its process group
-        // and that process group is distinct from our own application process group.
-        if target_pgid > 1 && target_pgid == (pid as libc::pid_t) && target_pgid != current_pgid {
-            unsafe {
-                libc::kill(-target_pgid, libc::SIGKILL);
-            }
-        }
-
         for p_pid in &pids_to_kill {
             if *p_pid as libc::pid_t != current_pid {
                 unsafe {

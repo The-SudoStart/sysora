@@ -38,12 +38,12 @@ DL_URL="https://github.com/$REPO/releases/download/${TAG}/Sysora_${PKG_VER}_${PK
 
 echo "🔍 Checking release asset: $DL_URL"
 if ! curl -sI -f "$DL_URL" > /dev/null; then
-  # Fallback: check GitHub API assets for any matching amd64 deb file
-  ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o '"browser_download_url": *"[^"]*amd64\.deb"' | head -1 | cut -d '"' -f 4 || true)
+  # Fallback: check GitHub API assets for matching architecture deb file
+  ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o "\"browser_download_url\": *\"[^\"]*${PKG_ARCH}\\.deb\"" | head -1 | cut -d '"' -f 4 || true)
   if [[ -n "$ALT_URL" ]]; then
     DL_URL="$ALT_URL"
   else
-    echo "❌ Could not find .deb package in release $TAG ($DL_URL)"
+    echo "❌ Could not find .deb package for $PKG_ARCH in release $TAG ($DL_URL)"
     echo "   Visit https://github.com/$REPO/releases to verify available assets"
     exit 1
   fi
@@ -61,12 +61,19 @@ if [[ ! -s "$TMP/sysora.deb" ]]; then
 fi
 
 echo "🔍 Verifying package integrity..."
-# Try to fetch and verify sha256 checksum if published with release
-if curl -fsSL "${DL_URL}.sha256" -o "$TMP/sysora.deb.sha256" 2>/dev/null; then
+if ! curl -fsSL "${DL_URL}.sha256" -o "$TMP/sysora.deb.sha256" 2>/dev/null; then
+  if [[ "${SYSORA_INSECURE_NO_CHECKSUM:-0}" = "1" ]]; then
+    echo "⚠️ Warning: Release checksum not found; proceeding because SYSORA_INSECURE_NO_CHECKSUM=1."
+  else
+    echo "❌ Required release checksum (${DL_URL}.sha256) could not be retrieved."
+    echo "   Failing closed to prevent installation of unverified package."
+    exit 1
+  fi
+else
   echo "🔐 Verifying SHA256 checksum..."
   EXPECTED_SHA=$(awk '{print $1}' "$TMP/sysora.deb.sha256")
   ACTUAL_SHA=$(sha256sum "$TMP/sysora.deb" | awk '{print $1}')
-  if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+  if [[ -z "$EXPECTED_SHA" ]] || [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
     echo "❌ Checksum verification failed!"
     echo "   Expected: $EXPECTED_SHA"
     echo "   Actual:   $ACTUAL_SHA"
