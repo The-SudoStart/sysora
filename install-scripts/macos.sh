@@ -43,11 +43,28 @@ trap 'rm -rf "$TMP"' EXIT
 echo "⬇️ Downloading Sysora ($TAG)..."
 curl -fsSL "$DL_URL" -o "$TMP/Sysora.dmg"
 
+if [[ ! -s "$TMP/Sysora.dmg" ]]; then
+  echo "❌ Downloaded DMG package is empty or missing."
+  exit 1
+fi
+
+echo "🔍 Verifying package integrity..."
+if curl -fsSL "${DL_URL}.sha256" -o "$TMP/Sysora.dmg.sha256" 2>/dev/null; then
+  echo "🔐 Verifying SHA256 checksum..."
+  EXPECTED_SHA=$(awk '{print $1}' "$TMP/Sysora.dmg.sha256")
+  ACTUAL_SHA=$(shasum -a 256 "$TMP/Sysora.dmg" | awk '{print $1}')
+  if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+    echo "❌ Checksum verification failed!"
+    exit 1
+  fi
+  echo "✅ Checksum verified."
+fi
+
 echo "📦 Mounting installer..."
 hdiutil attach "$TMP/Sysora.dmg" -mountpoint "$TMP/mount" -quiet
 APP_PATH=$(find "$TMP/mount" -maxdepth 1 -name "*.app" -print -quit)
-if [[ -z "$APP_PATH" ]]; then
-  echo "❌ Could not find Sysora.app in mounted DMG"
+if [[ -z "$APP_PATH" ]] || [[ ! -f "$APP_PATH/Contents/Info.plist" ]]; then
+  echo "❌ Could not find a valid Sysora.app bundle in mounted DMG"
   hdiutil detach "$TMP/mount" -quiet
   exit 1
 fi
@@ -56,8 +73,15 @@ TARGET="/Applications/Sysora.app"
 echo "📦 Copying to /Applications..."
 rm -rf "$TARGET"
 cp -R "$APP_PATH" /Applications/
-xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
 hdiutil detach "$TMP/mount" -quiet
+
+# Intentionally bypass macOS Gatekeeper and unverified signature checks automatically
+if [[ -f "$TARGET/Contents/Info.plist" ]]; then
+  echo "🔓 Applying intentional signature bypass & clearing quarantine..."
+  xattr -cr "$TARGET" 2>/dev/null || true
+  xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+  codesign --force --deep --sign - "$TARGET" 2>/dev/null || true
+fi
 
 APP_DATA_DIR="$HOME/Library/Application Support/sysora"
 if [[ -d "$APP_DATA_DIR" ]]; then

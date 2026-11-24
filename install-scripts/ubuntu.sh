@@ -55,6 +55,32 @@ trap 'rm -rf "$TMP"' EXIT
 echo "⬇️ Downloading Sysora ($TAG)..."
 curl -fsSL "$DL_URL" -o "$TMP/sysora.deb"
 
+if [[ ! -s "$TMP/sysora.deb" ]]; then
+  echo "❌ Downloaded package is empty or missing."
+  exit 1
+fi
+
+echo "🔍 Verifying package integrity..."
+# Try to fetch and verify sha256 checksum if published with release
+if curl -fsSL "${DL_URL}.sha256" -o "$TMP/sysora.deb.sha256" 2>/dev/null; then
+  echo "🔐 Verifying SHA256 checksum..."
+  EXPECTED_SHA=$(awk '{print $1}' "$TMP/sysora.deb.sha256")
+  ACTUAL_SHA=$(sha256sum "$TMP/sysora.deb" | awk '{print $1}')
+  if [[ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]]; then
+    echo "❌ Checksum verification failed!"
+    echo "   Expected: $EXPECTED_SHA"
+    echo "   Actual:   $ACTUAL_SHA"
+    exit 1
+  fi
+  echo "✅ Checksum verified."
+fi
+
+# Validate Debian package structure before root execution
+if ! dpkg-deb -I "$TMP/sysora.deb" >/dev/null 2>&1; then
+  echo "❌ Downloaded file is not a valid Debian archive."
+  exit 1
+fi
+
 echo "📦 Installing Sysora package..."
 if command -v pkexec >/dev/null 2>&1; then
   SUDO="pkexec"

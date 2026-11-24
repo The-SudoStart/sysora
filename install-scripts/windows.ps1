@@ -43,11 +43,41 @@ try {
 Write-Output "⬇️ Downloading Sysora from: $DownloadUrl"
 Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempPath -UseBasicParsing
 
+if (-not (Test-Path $TempPath) -or ((Get-Item $TempPath).Length -lt 10240)) {
+    Write-Output "Error: Downloaded setup file is missing or corrupted."
+    exit 1
+}
+
+Write-Output "🔍 Verifying package integrity..."
+try {
+    $ShaUrl = "$DownloadUrl.sha256"
+    $ShaFile = Join-Path $env:TEMP "Sysora_${Ver}_setup.exe.sha256"
+    Invoke-WebRequest -Uri $ShaUrl -OutFile $ShaFile -ErrorAction Stop -UseBasicParsing
+    $ExpectedHash = (Get-Content $ShaFile).Trim().Split()[0].ToUpper()
+    $ActualHash = (Get-FileHash -Path $TempPath -Algorithm SHA256).Hash.ToUpper()
+    Remove-Item -Path $ShaFile -Force -ErrorAction SilentlyContinue
+    if ($ExpectedHash -ne $ActualHash) {
+        Write-Output "Error: SHA256 Checksum mismatch!"
+        Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
+        exit 1
+    }
+    Write-Output "✅ Checksum verified."
+} catch {
+    # Checksum file optional if release doesn't supply one
+}
+
 Write-Output "📦 Running installer..."
 try {
-    Start-Process -FilePath $TempPath -ArgumentList "/S" -Verb RunAs -Wait
+    $proc = Start-Process -FilePath $TempPath -ArgumentList "/S" -Verb RunAs -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        Write-Output "Error: Installer exited with code $($proc.ExitCode)"
+        Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
+        exit $proc.ExitCode
+    }
+    Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
     Write-Output "✅ Sysora updated successfully to $Tag!"
 } catch {
     Write-Output "Error: UAC prompt was cancelled or elevation failed."
+    Remove-Item -Path $TempPath -Force -ErrorAction SilentlyContinue
     exit 1602
 }

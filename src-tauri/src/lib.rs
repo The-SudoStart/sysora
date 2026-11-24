@@ -545,19 +545,29 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
         }
     }
 
+    // Ensure our own process is never targeted
+    pids_to_kill.remove(&std::process::id());
+
     // Direct termination pass: process group & collected PIDs
     #[cfg(unix)]
     {
-        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
-        if pgid > 1 {
+        let current_pid = std::process::id() as libc::pid_t;
+        let current_pgid = unsafe { libc::getpgid(current_pid) };
+        let target_pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+
+        // Only kill by PGID if the target process is the leader of its process group
+        // and that process group is distinct from our own application process group.
+        if target_pgid > 1 && target_pgid == (pid as libc::pid_t) && target_pgid != current_pgid {
             unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
+                libc::kill(-target_pgid, libc::SIGKILL);
             }
         }
 
         for p_pid in &pids_to_kill {
-            unsafe {
-                libc::kill(*p_pid as libc::pid_t, libc::SIGKILL);
+            if *p_pid as libc::pid_t != current_pid {
+                unsafe {
+                    libc::kill(*p_pid as libc::pid_t, libc::SIGKILL);
+                }
             }
         }
     }
@@ -573,7 +583,14 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
 
     std::thread::sleep(std::time::Duration::from_millis(60));
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
+
+    let remaining_pids: Vec<u32> = pids_to_kill
+        .iter()
+        .copied()
+        .filter(|p| sys.process(sysinfo::Pid::from_u32(*p)).is_some())
+        .collect();
+
+    if remaining_pids.is_empty() {
         return Ok(());
     }
 
@@ -582,67 +599,67 @@ fn kill_process(pid: u32, state: State<SysState>) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        let by_name = Command::new("pkexec")
+        let _ = Command::new("pkexec")
             .args(["killall", "-9", &raw_name])
             .status();
-        if by_name.map(|s| s.success()).unwrap_or(false) {
-            return Ok(());
-        }
         if !app_stem.is_empty() && app_stem != raw_name {
             let _ = Command::new("pkexec")
                 .args(["killall", "-9", &app_stem])
                 .status();
         }
-        let status = Command::new("pkexec")
-            .args(["kill", "-9", &pid_str])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            return Ok(());
+        for rem_pid in &remaining_pids {
+            let _ = Command::new("pkexec")
+                .args(["kill", "-9", &rem_pid.to_string()])
+                .status();
         }
     }
 
     #[cfg(target_os = "macos")]
     {
+        let rem_pids_str = remaining_pids
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
         let script = format!(
-            "do shell script \"killall -9 '{}' || kill -9 {}\" with administrator privileges",
+            "do shell script \"killall -9 '{}' 2>/dev/null; kill -9 {} 2>/dev/null || true\" with administrator privileges",
             raw_name.replace('\'', "'\\''"),
-            pid
+            rem_pids_str
         );
-        let status = Command::new("osascript")
+        let _ = Command::new("osascript")
             .args(["-e", &script])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            return Ok(());
-        }
+            .status();
     }
 
     #[cfg(target_os = "windows")]
     {
-        let status = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Start-Process taskkill -ArgumentList '/F', '/T', '/PID', '{}' -Verb RunAs -WindowStyle Hidden -Wait",
-                    pid
-                ),
-            ])
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            return Ok(());
+        for rem_pid in &remaining_pids {
+            let _ = Command::new("powershell")
+                .args([
+                    "-Command",
+                    &format!(
+                        "Start-Process taskkill -ArgumentList '/F', '/T', '/PID', '{}' -Verb RunAs -WindowStyle Hidden -Wait",
+                        rem_pid
+                    ),
+                ])
+                .status();
         }
     }
 
-    // Verify termination before confirming to UI
+    // Verify termination of all target PIDs before confirming to UI
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    if sys.process(sysinfo::Pid::from_u32(pid)).is_none() {
+    let still_alive: Vec<u32> = pids_to_kill
+        .iter()
+        .copied()
+        .filter(|p| sys.process(sysinfo::Pid::from_u32(*p)).is_some())
+        .collect();
+
+    if still_alive.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "Failed to terminate '{}' (PID {}). The process may be protected by the system.",
-            raw_name, pid
+            "Failed to terminate '{}' (PID {}, {} related process(es) still running). The process may be protected by the system.",
+            raw_name, pid, still_alive.len()
         ))
     }
 }

@@ -5,8 +5,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-const VERSION_FILE_URL: &str =
-    "https://raw.githubusercontent.com/The-SudoStart/sysora/main/version.txt";
 const RELEASES_API_URL: &str =
     "https://api.github.com/repos/The-SudoStart/sysora/releases/latest";
 
@@ -15,6 +13,7 @@ pub struct UpdateInfo {
     pub current_version: String,
     pub latest_version: Option<String>,
     pub update_available: bool,
+    pub release_notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,25 +65,57 @@ async fn fetch_curl_output(url: &str, headers: &[&str]) -> Option<String> {
     }
 }
 
-/// Fetch the latest version from GitHub version.txt or releases API.
-pub async fn fetch_latest_version() -> Option<String> {
-    // 1. Try raw version.txt on main branch
-    if let Some(content) = fetch_curl_output(VERSION_FILE_URL, &[]).await {
-        let first_line = content.lines().next().unwrap_or("").trim().to_string();
-        if !first_line.is_empty() && parse_version(&first_line).is_some() {
-            return Some(first_line);
-        }
-    }
+fn platform_asset_extension() -> &'static str {
+    #[cfg(target_os = "windows")]
+    { ".exe" }
+    #[cfg(target_os = "macos")]
+    { ".dmg" }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    { ".deb" }
+}
 
-    // 2. Fallback: check GitHub releases API for latest tag_name
+/// Fetch the latest verified release from GitHub Releases API.
+/// Only offers an update if release assets exist for the current platform.
+pub async fn fetch_latest_release() -> Option<(String, Option<String>)> {
     if let Some(json_str) = fetch_curl_output(RELEASES_API_URL, &["User-Agent: Sysora"]).await {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            if let Some(tag) = json.get("tag_name").and_then(|t| t.as_str()) {
-                let clean = tag.trim_start_matches('v').trim().to_string();
-                if parse_version(&clean).is_some() {
-                    return Some(clean);
-                }
+            if json.get("draft").and_then(|d| d.as_bool()).unwrap_or(false) {
+                return None;
             }
+
+            let tag = json.get("tag_name").and_then(|t| t.as_str())?;
+            let clean_tag = tag.trim_start_matches('v').trim().to_string();
+            if parse_version(&clean_tag).is_none() {
+                return None;
+            }
+
+            // Verify a matching release asset exists for this platform
+            let ext = platform_asset_extension();
+            let has_asset = json
+                .get("assets")
+                .and_then(|a| a.as_array())
+                .map(|assets| {
+                    assets.iter().any(|asset| {
+                        asset
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|name| name.ends_with(ext))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_asset {
+                return None;
+            }
+
+            let release_notes = json
+                .get("body")
+                .and_then(|b| b.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+
+            return Some((clean_tag, release_notes));
         }
     }
 
@@ -105,7 +136,11 @@ pub fn get_local_version(app: &AppHandle) -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-pub fn evaluate_update(current: &str, latest: Option<&str>) -> UpdateInfo {
+pub fn evaluate_update(
+    current: &str,
+    latest: Option<&str>,
+    release_notes: Option<String>,
+) -> UpdateInfo {
     let update_available = match (latest, parse_version(current)) {
         (Some(latest_ver), Some(cur)) => {
             parse_version(latest_ver).map(|l| l > cur).unwrap_or(false)
@@ -117,14 +152,19 @@ pub fn evaluate_update(current: &str, latest: Option<&str>) -> UpdateInfo {
         current_version: current.to_string(),
         latest_version: latest.map(|s| s.trim_start_matches('v').to_string()),
         update_available,
+        release_notes,
     }
 }
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
     let current = get_local_version(&app);
-    let latest = fetch_latest_version().await;
-    Ok(evaluate_update(&current, latest.as_deref()))
+    let release = fetch_latest_release().await;
+    let (latest_ver, notes) = match release {
+        Some((ver, notes)) => (Some(ver), notes),
+        None => (None, None),
+    };
+    Ok(evaluate_update(&current, latest_ver.as_deref(), notes))
 }
 
 fn get_update_script_name() -> &'static str {
@@ -139,7 +179,7 @@ fn get_update_script_name() -> &'static str {
 fn resolve_script(app: &AppHandle) -> Result<PathBuf, String> {
     let script_name = get_update_script_name();
 
-    // 1. Try bundled resource directory
+    // 1. Try bundled resource directory via Tauri path resolver
     if let Ok(path) = app.path().resolve(format!("install-scripts/{}", script_name), tauri::path::BaseDirectory::Resource) {
         if path.exists() {
             return Ok(path);
@@ -150,24 +190,21 @@ fn resolve_script(app: &AppHandle) -> Result<PathBuf, String> {
             return Ok(path);
         }
     }
-
-    // 2. Try install-scripts relative to current exe or working directory (dev mode)
-    let candidates = [
-        PathBuf::from("install-scripts").join(script_name),
-        PathBuf::from("../install-scripts").join(script_name),
-        PathBuf::from("resources").join(script_name),
-    ];
-
-    for candidate in candidates {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidate = resource_dir.join("install-scripts").join(script_name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        let candidate = resource_dir.join(script_name);
         if candidate.exists() {
             return Ok(candidate);
         }
     }
 
-    // 3. Fallback: check exe parent directory
+    // 2. Try packaged resources next to current executable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidate1 = exe_dir.join("install-scripts").join(script_name);
+            let candidate1 = exe_dir.join("resources").join("install-scripts").join(script_name);
             if candidate1.exists() {
                 return Ok(candidate1);
             }
@@ -179,7 +216,7 @@ fn resolve_script(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "Could not locate update script '{}'. Please ensure install-scripts/ are present.",
+        "Could not locate secure bundled update script '{}'. Please ensure install-scripts are packaged with Sysora.",
         script_name
     ))
 }
@@ -331,19 +368,24 @@ pub fn notify_update_available(#[allow(unused_variables)] app: &AppHandle, lates
     }
 }
 
-/// Spawns a background check on startup.
+/// Spawns a background periodic update check.
 pub fn start_background_update_checker(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        // Wait 5 seconds after startup before checking
+        // Wait 5 seconds after startup before initial check
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-        let current = get_local_version(&app);
-        if let Some(latest) = fetch_latest_version().await {
-            let info = evaluate_update(&current, Some(&latest));
-            if info.update_available {
-                notify_update_available(&app, &latest);
-                let _ = app.emit("update-available", &info);
+        loop {
+            let current = get_local_version(&app);
+            if let Some((latest, notes)) = fetch_latest_release().await {
+                let info = evaluate_update(&current, Some(&latest), notes);
+                if info.update_available {
+                    notify_update_available(&app, &latest);
+                    let _ = app.emit("update-available", &info);
+                }
             }
+
+            // Check every 4 hours
+            tokio::time::sleep(tokio::time::Duration::from_secs(4 * 3600)).await;
         }
     });
 }
@@ -363,18 +405,20 @@ mod tests {
 
     #[test]
     fn test_evaluate_update() {
-        let update = evaluate_update("0.3.0", Some("0.3.1"));
+        let update = evaluate_update("0.3.0", Some("0.3.1"), Some("Bug fixes".to_string()));
         assert!(update.update_available);
         assert_eq!(update.current_version, "0.3.0");
         assert_eq!(update.latest_version, Some("0.3.1".to_string()));
+        assert_eq!(update.release_notes, Some("Bug fixes".to_string()));
 
-        let same = evaluate_update("0.3.0", Some("0.3.0"));
+        let same = evaluate_update("0.3.0", Some("0.3.0"), None);
         assert!(!same.update_available);
 
-        let older = evaluate_update("0.3.2", Some("0.3.1"));
+        let older = evaluate_update("0.3.2", Some("0.3.1"), None);
         assert!(!older.update_available);
 
-        let none = evaluate_update("0.3.0", None);
+        let none = evaluate_update("0.3.0", None, None);
         assert!(!none.update_available);
     }
 }
+

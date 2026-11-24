@@ -7,7 +7,8 @@ import {
   X, 
   Terminal, 
   Download,
-  Sparkles
+  Sparkles,
+  FileText
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "@/lib/api";
@@ -169,6 +170,21 @@ export function UpdateModal() {
               </p>
             </div>
           </div>
+
+          {/* Release Notes */}
+          {status === "ready" && updateInfo?.release_notes && (
+            <div className="space-y-2">
+              <span className="text-[10px] uppercase font-bold text-surface-400 dark:text-white/40 tracking-wider flex items-center gap-1.5">
+                <FileText size={12} /> Release Highlights
+              </span>
+              <div
+                className="p-3.5 rounded-xl bg-surface-50 dark:bg-white/[0.02] border border-surface-200 dark:border-white/5 text-xs text-surface-700 dark:text-surface-300 whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed font-sans"
+                style={{ scrollbarWidth: "thin" }}
+              >
+                {updateInfo.release_notes}
+              </div>
+            </div>
+          )}
 
           {/* Status Banners */}
           {status === "completed" && (
