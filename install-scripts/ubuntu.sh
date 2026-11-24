@@ -6,7 +6,10 @@ VERSION="${1:-latest}"
 
 echo "📥 Checking for latest Sysora release..."
 
-if [[ "$VERSION" = "latest" ]]; then
+if [[ "$VERSION" =~ ^https?:// ]]; then
+  DL_URL="$VERSION"
+  TAG=$(echo "$DL_URL" | grep -o 'download/[^/]*' | cut -d/ -f2)
+elif [[ "$VERSION" = "latest" ]]; then
   TAG=$(curl -sI "https://github.com/$REPO/releases/latest" | grep -i '^location:' | awk -F'/' '{print $NF}' | tr -d '\r\n')
   if [[ -z "$TAG" ]]; then
     TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d '"' -f 4)
@@ -34,18 +37,20 @@ else
   exit 1
 fi
 
-DL_URL="https://github.com/$REPO/releases/download/${TAG}/Sysora_${PKG_VER}_${PKG_ARCH}.deb"
+if [[ -z "${DL_URL:-}" ]]; then
+  DL_URL="https://github.com/$REPO/releases/download/${TAG}/Sysora_${PKG_VER}_${PKG_ARCH}.deb"
 
-echo "🔍 Checking release asset: $DL_URL"
-if ! curl -sI -f "$DL_URL" > /dev/null; then
-  # Fallback: check GitHub API assets for matching architecture deb file
-  ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o "\"browser_download_url\": *\"[^\"]*${PKG_ARCH}\\.deb\"" | head -1 | cut -d '"' -f 4 || true)
-  if [[ -n "$ALT_URL" ]]; then
-    DL_URL="$ALT_URL"
-  else
-    echo "❌ Could not find .deb package for $PKG_ARCH in release $TAG ($DL_URL)"
-    echo "   Visit https://github.com/$REPO/releases to verify available assets"
-    exit 1
+  echo "🔍 Checking release asset: $DL_URL"
+  if ! curl -sI -f "$DL_URL" > /dev/null; then
+    # Fallback: check GitHub API assets for matching architecture deb file
+    ALT_URL=$(curl -s "https://api.github.com/repos/$REPO/releases/tags/$TAG" | grep -o "\"browser_download_url\": *\"[^\"]*${PKG_ARCH}\\.deb\"" | head -1 | cut -d '"' -f 4 || true)
+    if [[ -n "$ALT_URL" ]]; then
+      DL_URL="$ALT_URL"
+    else
+      echo "❌ Could not find .deb package for $PKG_ARCH in release $TAG ($DL_URL)"
+      echo "   Visit https://github.com/$REPO/releases to verify available assets"
+      exit 1
+    fi
   fi
 fi
 

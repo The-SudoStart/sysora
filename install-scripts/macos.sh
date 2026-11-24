@@ -100,18 +100,37 @@ if [[ "$BUNDLE_EXE" != "sysora" && "$BUNDLE_EXE" != "Sysora" ]]; then
   exit 1
 fi
 
+echo "🔍 Checking code signature..."
+if codesign -v --strict "$APP_PATH" 2>/dev/null; then
+  echo "✅ Bundle has a valid Apple Developer code signature."
+  SIGNATURE_VERIFIED=1
+else
+  SIGNATURE_VERIFIED=0
+  if [[ "${SYSORA_REQUIRE_CODESIGN:-0}" = "1" ]]; then
+    echo "❌ Code signature verification failed and SYSORA_REQUIRE_CODESIGN=1 is set."
+    echo "   Failing closed for unsigned or ad-hoc builds."
+    hdiutil detach "$TMP/mount" -quiet
+    exit 1
+  fi
+  echo "ℹ️ Self-distributed release without Apple Developer ID. Proceeding with intentional Gatekeeper bypass."
+fi
+
 TARGET="/Applications/Sysora.app"
 echo "📦 Copying to /Applications..."
 rm -rf "$TARGET"
 cp -R "$APP_PATH" /Applications/
 hdiutil detach "$TMP/mount" -quiet
 
-# Intentionally bypass macOS Gatekeeper and unverified signature checks automatically
+# Intentionally bypass macOS Gatekeeper and unverified signature checks automatically for self-distributed builds
 if [[ -f "$TARGET/Contents/Info.plist" ]]; then
-  echo "🔓 Applying intentional signature bypass & clearing quarantine..."
-  xattr -cr "$TARGET" 2>/dev/null || true
-  xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
-  codesign --force --deep --sign - "$TARGET" 2>/dev/null || true
+  if [[ "$SIGNATURE_VERIFIED" -eq 1 ]]; then
+    echo "✅ Preserving verified developer signature."
+  else
+    echo "🔓 Applying intentional signature bypass & clearing quarantine..."
+    xattr -cr "$TARGET" 2>/dev/null || true
+    xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+    codesign --force --deep --sign - "$TARGET" 2>/dev/null || true
+  fi
 fi
 
 APP_DATA_DIR="$HOME/Library/Application Support/sysora"
