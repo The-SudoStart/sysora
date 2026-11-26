@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { listen } from "@tauri-apps/api/event";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { MemoryTab }    from "@/components/tabs/MemoryTab";
@@ -10,8 +11,10 @@ import { DiskTab }      from "@/components/tabs/DiskTab";
 import { SystemInfoTab } from "@/components/tabs/SystemInfoTab";
 import { HistoryTab } from "@/components/tabs/HistoryTab";
 import { SettingsTab }  from "@/components/tabs/SettingsTab";
+import { UpdateModal }  from "@/components/modals/UpdateModal";
 import { useAppStore }  from "@/store/app";
 import { api } from "@/lib/api";
+import type { UpdateInfo } from "@/types";
 
 export function Shell() {
   const activeTab = useAppStore((s) => s.activeTab);
@@ -39,6 +42,31 @@ export function Shell() {
     }
   }, [settings?.theme]);
 
+  // Check for updates on startup & listen for background update events
+  const setUpdateInfo = useAppStore((s) => s.setUpdateInfo);
+  useEffect(() => {
+    // Initial check
+    api.checkForUpdates()
+      .then((info) => {
+        setUpdateInfo(info);
+      })
+      .catch((err) => {
+        console.warn("[updater] Could not check for updates:", err);
+      });
+
+    // Background push event from Tauri backend
+    let unlisten: (() => void) | undefined;
+    listen<UpdateInfo>("update-available", (event) => {
+      setUpdateInfo(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [setUpdateInfo]);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-surface-50 text-surface-900 dark:bg-surface-900 dark:text-white font-sans transition-colors duration-300">
       <Sidebar />
@@ -55,6 +83,7 @@ export function Shell() {
           {activeTab === "settings"    && <SettingsTab />}
         </main>
       </div>
+      <UpdateModal />
     </div>
   );
 }

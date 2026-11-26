@@ -8,19 +8,28 @@ use clap::Parser;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     
-    // If we have more than 1 argument, or the first argument is not the binary path (unlikely), 
-    // we assume CLI mode. Note: Tauri might pass some args, so we check specifically.
-    if args.len() > 1 {
-        // If the only argument is --minimized, we let it fall through to the GUI
-        if args.len() == 2 && args[1] == "--minimized" {
-            // Proceed to GUI
-        } else {
-            // For any other arguments, we treat it as a CLI call.
-            // .parse() will print help/errors and exit the process.
-            let parsed = cli::Cli::parse();
-            cli::run_cli(parsed);
-            return;
-        }
+    // Check if any recognized CLI subcommand or output flag was provided
+    let is_cli = args.iter().skip(1).any(|a| {
+        matches!(
+            a.as_str(),
+            "status"
+                | "processes"
+                | "disk"
+                | "battery"
+                | "fans"
+                | "--json"
+                | "-j"
+                | "-h"
+                | "--help"
+                | "-V"
+                | "--version"
+        )
+    });
+
+    if is_cli {
+        let parsed = cli::Cli::parse();
+        cli::run_cli(parsed);
+        return;
     }
 
     sysora_lib::run();
